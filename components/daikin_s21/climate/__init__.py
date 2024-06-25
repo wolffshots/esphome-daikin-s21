@@ -70,7 +70,8 @@ async def to_code(config):
             cg.add(var.set_setpoint_interval(config[CONF_SETPOINT_INTERVAL]))
 
     if CONF_SUPPORTED_MODES in config:
-        cg.add(var.set_supported_modes(config[CONF_SUPPORTED_MODES]))    else:
+        cg.add(var.set_supported_modes(config[CONF_SUPPORTED_MODES]))    
+    else:
         cg.add(var.set_supported_modes([
             ClimateMode.CLIMATE_MODE_COOL,
             ClimateMode.CLIMATE_MODE_HEAT,
