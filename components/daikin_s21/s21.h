@@ -81,7 +81,7 @@ class DaikinS21 : public PollingComponent {
   bool power_on = false;
   DaikinClimateMode mode = DaikinClimateMode::Disabled;
   DaikinFanMode fan = DaikinFanMode::Auto;
-  int16_t setpoint = 23;
+  int16_t setpoint = 21;
   bool swing_v = false;
   bool swing_h = false;
   bool powerful = false;
@@ -92,6 +92,8 @@ class DaikinS21 : public PollingComponent {
   uint16_t fan_rpm = 0;
   bool idle = true;
   bool has_presets = true;
+  uint8_t f8_protocol = -1;
+  float fy00_protocol = -1.0;
 };
 
 class DaikinS21Client {

@@ -339,6 +339,32 @@ bool DaikinS21::parse_response(std::vector<uint8_t> rcode,
         case '7':                // F7 - G7 - "eco" mode
           this->econo = (payload[1] == '2') ? 1 : 0;
           return true;
+        case '8':
+          if(
+                  (payload[0] == 0x30) && 
+                  (payload[1] == 0x00) && 
+                  (payload[2] == 0x00) && 
+                  (payload[3] == 0x00)
+                  ) {
+            this->f8_protocol = 0;
+          } else if(
+                  (payload[0] == 0x30) && 
+                  (payload[1] == 0x32) && 
+                  (payload[2] == 0x00) && 
+                  (payload[3] == 0x00)
+                  ) {
+                  this->f8_protocol = 2;
+          } else if(
+                  (payload[0] == 0x30) && 
+                  (payload[1] == 0x32) && 
+                  (payload[2] == 0x30) && 
+                  (payload[3] == 0x30) 
+                  ) {
+            this->f8_protocol = 2;
+          } else {
+            return false;
+          }
+          return true;
         case '9':  // F9 -> G9 -- Inside temperature
           this->temp_inside = temp_f9_byte_to_c10(&payload[0]);
           this->temp_outside = temp_f9_byte_to_c10(&payload[1]);
@@ -392,7 +418,7 @@ bool DaikinS21::run_queries(std::vector<std::string> queries) {
 void DaikinS21::update() {
   std::vector<std::string> queries = {"F1", "F5", "Rd"};
   // These queries might fail but they won't affect the basic functionality
-  std::vector<std::string> failable_queries = {"F6", "F7", "F9", "RH", "RI", "Ra", "RL"};
+  std::vector<std::string> failable_queries = {"F6", "F7", "F9", "RH", "RI", "Ra", "RL", "F8"};
   if (this->run_queries(queries)) {
     this->run_queries(failable_queries);
     if(!this->ready) {
@@ -437,6 +463,8 @@ void DaikinS21::dump_state() {
            c10_f(this->temp_outside));
   ESP_LOGD(TAG, "   Coil: %.1f C (%.1f F)", c10_c(this->temp_coil),
            c10_f(this->temp_coil));
+  ESP_LOGD(TAG, "    Protocol: x (F8: %d, FY00: %.1f)",
+           this->f8_protocol, this->fy00_protocol);
 
   ESP_LOGD(TAG, "** END STATE *****************************");
 }
