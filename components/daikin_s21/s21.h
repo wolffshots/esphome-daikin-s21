@@ -2,6 +2,7 @@
 
 #include "esphome/components/uart/uart.h"
 #include "esphome/core/component.h"
+#include "utils.h"
 
 namespace esphome {
 namespace daikin_s21 {
@@ -24,6 +25,53 @@ enum class DaikinFanMode : uint8_t {
   Speed4 = '6',
   Speed5 = '7',
 };
+
+namespace StateQuery {
+  inline constexpr const char* Basic = "F1";
+  inline constexpr const char* Swing = "F5";
+  inline constexpr const char* Powerful = "F6";
+  inline constexpr const char* Econo = "F7";
+  inline constexpr const char* OldProtocol = "F8";
+  inline constexpr const char* NewProtocol = "FY00";
+  inline constexpr const char* InsideOutsideTemperatures = "F9";
+}  // namespace StateQuery
+
+namespace EnvironmentQuery {
+  inline constexpr const char* Inside = "RH";
+  inline constexpr const char* Coil = "RI";
+  inline constexpr const char* Outside = "Ra";
+  inline constexpr const char* FanSpeed = "RL";
+  inline constexpr const char* Compressor = "Rd";
+} // namespace EnvironmentQuery
+
+namespace StateResponse {
+  inline constexpr const char* Basic = "G1";
+  inline constexpr const char* Swing = "G5";
+  inline constexpr const char* Powerful = "G6";
+  inline constexpr const char* Econo = "G7";
+  inline constexpr const char* OldProtocol = "G8";
+  inline constexpr const char* NewProtocol = "GY00";
+  inline constexpr const char* InsideOutsideTemperatures = "G9";
+}  // namespace StateResponse
+
+namespace EnvironmentResponse {
+  inline constexpr const char* Inside = "SH";
+  inline constexpr const char* Coil = "SI";
+  inline constexpr const char* Outside = "Sa";
+  inline constexpr const char* FanSpeed = "SL";
+  inline constexpr const char* Compressor = "Sd";
+} // namespace EnvironmentResponse
+
+namespace OldProtocol {
+  inline constexpr const char* Protocol0 = "\x30\x00\x00\x00";
+  inline constexpr const char* Protocol2_1 = "\x30\x32\x00\x00";
+  inline constexpr const char* Protocol2_2 = "\x30\x32\x30\x30";
+}  // namespace OldProtocol
+
+namespace NewProtocol {
+  inline constexpr const char* Protocol3_00_or_3_10 = "0030";
+  inline constexpr const char* Protocol3_20 = "0230";
+}  // namespace NewProtocol
 
 std::string daikin_climate_mode_to_string(DaikinClimateMode mode);
 std::string daikin_fan_mode_to_string(DaikinFanMode mode);
@@ -92,8 +140,11 @@ class DaikinS21 : public PollingComponent {
   uint16_t fan_rpm = 0;
   bool idle = true;
   bool has_presets = true;
+  bool protocol_checked = false;
   uint8_t f8_protocol = -1;
-  float fy00_protocol = -1.0;
+  uint8_t f8_protocol_variant = -1;
+  uint8_t fy00_protocol_major = -1;
+  uint8_t fy00_protocol_minor = -1;
 };
 
 class DaikinS21Client {
