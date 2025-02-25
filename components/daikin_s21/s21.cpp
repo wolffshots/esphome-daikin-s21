@@ -10,7 +10,7 @@ namespace daikin_s21 {
 #define ACK 6
 #define NAK 21
 
-#define S21_RESPONSE_TIMEOUT 250
+#define S21_RESPONSE_TIMEOUT 500
 
 static const char *const TAG = "daikin_s21";
 
@@ -320,84 +320,107 @@ bool DaikinS21::parse_response(std::vector<uint8_t> rcode,
              str_repr(payload).c_str(), payload.size());
   }
 
-  switch (rcode[0]) {
-    case 'G':      // F -> G
-      switch (rcode[1]) {
-        case '1':  // F1 -> Basic State
-          this->power_on = (payload[0] == '1');
-          this->mode = (DaikinClimateMode) payload[1];
-          this->setpoint = ((payload[2] - 28) * 5);  // Celsius * 10
-          this->fan = (DaikinFanMode) payload[3];
-          return true;
-        case '5':  // F5 -> G5 -- Swing state
-          this->swing_v = payload[0] & 1;
-          this->swing_h = payload[0] & 2;
-          return true;
-        case '6':                // F6 -> G6 - "powerful" mode
-          this->powerful = (payload[0] == '2') ? 1 : 0;
-          return true;
-        case '7':                // F7 - G7 - "eco" mode
-          this->econo = (payload[1] == '2') ? 1 : 0;
-          return true;
-        case '8':
-          if(
-                  (payload[0] == 0x30) && 
-                  (payload[1] == 0x00) && 
-                  (payload[2] == 0x00) && 
-                  (payload[3] == 0x00)
-                  ) {
-            this->f8_protocol = 0;
-          } else if(
-                  (payload[0] == 0x30) && 
-                  (payload[1] == 0x32) && 
-                  (payload[2] == 0x00) && 
-                  (payload[3] == 0x00)
-                  ) {
-                  this->f8_protocol = 2;
-          } else if(
-                  (payload[0] == 0x30) && 
-                  (payload[1] == 0x32) && 
-                  (payload[2] == 0x30) && 
-                  (payload[3] == 0x30) 
-                  ) {
-            this->f8_protocol = 2;
-          } else {
-            return false;
-          }
-          return true;
-        case '9':  // F9 -> G9 -- Inside temperature
-          this->temp_inside = temp_f9_byte_to_c10(&payload[0]);
-          this->temp_outside = temp_f9_byte_to_c10(&payload[1]);
-          return true;
+  if(uint8_starts_with_str(rcode, "G")) {
+    if(uint8_starts_with_str(rcode, StateResponse::Basic)) {
+      // F1 -> G1 Basic State
+      this->power_on = (payload[0] == '1');
+      this->mode = (DaikinClimateMode) payload[1];
+      this->setpoint = ((payload[2] - 28) * 5);  // Celsius * 10
+      this->fan = (DaikinFanMode) payload[3];
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::Swing)) {
+      // F5 -> G5 -- Swing state
+      this->swing_v = payload[0] & 1;
+      this->swing_h = payload[0] & 2;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::Powerful)) {
+      // F6 -> G6 - "powerful" mode
+      this->powerful = (payload[0] == '2') ? 1 : 0;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::Econo)) {
+      // F7 -> G7 - "eco" mode
+      this->econo = (payload[1] == '2') ? 1 : 0;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::OldProtocol)) {
+      // F8 -> G8 - old protocol version
+      if(uint8_starts_with_str(payload, OldProtocol::Protocol0)) {
+        this->f8_protocol = 0;
+        this->protocol_checked = true;
+      } else if(uint8_starts_with_str(payload, OldProtocol::Protocol2_1)) {
+        this->f8_protocol = 2;
+        this->f8_protocol_variant = 1;
+        if (this->fy00_protocol_major == 3) {
+          this->fy00_protocol_minor = 0;
+          this->protocol_checked = true;
+        }
+      } else if(uint8_starts_with_str(payload, OldProtocol::Protocol2_2)) {
+        this->f8_protocol = 2;
+        this->f8_protocol_variant = 2;
+        if (this->fy00_protocol_major == 3) {
+          this->fy00_protocol_minor = 1;
+          this->protocol_checked = true;
+        }
+      } else {
+        return false;
       }
-      break;
-    case 'S':      // R -> S
-      switch (rcode[1]) {
-        case 'H':  // Inside temperature
-          this->temp_inside = temp_bytes_to_c10(payload);
-          return true;
-        case 'I':  // Coil temperature
-          this->temp_coil = temp_bytes_to_c10(payload);
-          return true;
-        case 'a':  // Outside temperature
-          this->temp_outside = temp_bytes_to_c10(payload);
-          return true;
-        case 'L':  // Fan speed
-          this->fan_rpm = bytes_to_num(payload) * 10;
-          return true;
-        case 'd':  // Compressor state / frequency? Idle if 0.
-          this->idle =
-              (payload[0] == '0' && payload[1] == '0' && payload[2] == '0');
-          return true;
-        default:
-          if (payload.size() > 3) {
-            int8_t temp = temp_bytes_to_c10(payload);
-            ESP_LOGD(TAG, "Unknown temp: %s -> %s -> %.1f C (%.1f F)",
-                     str_repr(rcode).c_str(), str_repr(payload).c_str(),
-                     c10_c(temp), c10_f(temp));
-          }
-          return false;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::NewProtocol)) {
+      // FY00 -> GY00 - new protocol version
+      if(uint8_starts_with_str(payload, NewProtocol::Protocol3_00_or_3_10)) {
+        this->fy00_protocol_major = 3;
+        if (this->f8_protocol_variant == 1) {
+          this->fy00_protocol_minor = 0;
+          this->protocol_checked = true;
+        } else if (this->f8_protocol_variant == 2) {
+          this->fy00_protocol_minor = 1;
+          this->protocol_checked = true;
+        }
+      } else if(uint8_starts_with_str(payload, NewProtocol::Protocol3_20)) {
+        this->fy00_protocol_major = 3;
+        this->fy00_protocol_minor = 2;
+        this->protocol_checked = true;
+      } else {
+        return false;
       }
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::InsideOutsideTemperatures)) {
+      // F9 -> G9 - inside and outside temperature
+      this->temp_inside = temp_f9_byte_to_c10(&payload[0]);
+      this->temp_outside = temp_f9_byte_to_c10(&payload[1]);
+      return true;
+    } 
+  } else if(uint8_starts_with_str(rcode, "S")) {
+    if(uint8_starts_with_str(rcode, EnvironmentResponse::Inside)) {
+      // RH -> SH - inside temperature
+      this->temp_inside = temp_bytes_to_c10(payload);
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::Coil)) {
+      // RI -> SI - coil temperature
+      this->temp_coil = temp_bytes_to_c10(payload);
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::Outside)) {
+      // Ra -> Sa - outside temperature
+      this->temp_outside = temp_bytes_to_c10(payload);
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::FanSpeed)) {
+      // RL -> SL - fan speed
+      this->fan_rpm = bytes_to_num(payload) * 10;
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::Compressor)) {
+      // Rd -> Sd - compressor state / frequency? Idle if 0.
+      this->idle =
+      (payload[0] == '0' && payload[1] == '0' && payload[2] == '0');
+      return true;
+    } else {
+      // default
+      if (payload.size() > 3) {
+        int8_t temp = temp_bytes_to_c10(payload);
+        ESP_LOGD(TAG, "Unknown temp: %s -> %s -> %.1f C (%.1f F)",
+                 str_repr(rcode).c_str(), str_repr(payload).c_str(),
+                 c10_c(temp), c10_f(temp));
+        return false;
+      }
+    }
   }
   ESP_LOGD(TAG, "Unknown response %s -> \"%s\"", str_repr(rcode).c_str(),
            str_repr(payload).c_str());
@@ -415,10 +438,23 @@ bool DaikinS21::run_queries(std::vector<std::string> queries) {
   return success;  // True if all queries successful
 }
 
+std::vector<std::string> queries = {StateQuery::Basic, StateQuery::Swing, EnvironmentQuery::Compressor};
+// These queries might fail but they won't affect the basic functionality
+// F6, F7 and F9 should only be run for protocols that support it (after F8 and FY00)
+std::vector<std::string> failable_queries = {EnvironmentQuery::Inside, EnvironmentQuery::Coil, EnvironmentQuery::Outside, EnvironmentQuery::FanSpeed};
+// TODO set up queries for different protocol versions
+
 void DaikinS21::update() {
-  std::vector<std::string> queries = {"F1", "F5", "Rd"};
-  // These queries might fail but they won't affect the basic functionality
-  std::vector<std::string> failable_queries = {"F6", "F7", "F9", "RH", "RI", "Ra", "RL", "F8"};
+  // if protocol has not been set then we run the protocol queries
+  if(!this->protocol_checked || this->f8_protocol == 2 && this->fy00_protocol_major == -1) {
+    // protocol_checked is set when:
+    // - F8 returns 0
+    // - F8 returns one of the 2 version 2 variants and FY00 returns 3
+    // - FY00 returns protocol 3.2
+    // - FY00 returns protocol 3.0/3.1 and F8 is already one of the version 2 variants
+    // special case is when f8 version is 2 and fy00 is NAK, then we need to just assume protocol version 2
+    this->run_queries({StateQuery::OldProtocol, StateQuery::NewProtocol});
+  }
   if (this->run_queries(queries)) {
     this->run_queries(failable_queries);
     if(!this->ready) {
