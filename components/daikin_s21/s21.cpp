@@ -1,3 +1,4 @@
+#include <cinttypes>
 #include "s21.h"
 
 using namespace esphome;
@@ -109,7 +110,7 @@ void DaikinS21::check_uart_settings() {
       ESP_LOGE(
           TAG,
           "  Invalid baud_rate: Integration requested baud_rate %u but you "
-          "have %u!",
+          "have %" PRIu32 "!",
           S21_BAUD_RATE, uart->get_baud_rate());
     }
     if (uart->get_stop_bits() != S21_STOP_BITS) {
@@ -137,62 +138,8 @@ void DaikinS21::check_uart_settings() {
 
 void DaikinS21::dump_config() {
   ESP_LOGCONFIG(TAG, "DaikinS21:");
-  ESP_LOGCONFIG(TAG, "  Update interval: %u", this->get_update_interval());
+  ESP_LOGCONFIG(TAG, "  Update interval: %" PRIu32, this->get_update_interval());
   this->check_uart_settings();
-}
-
-// Adapated from ESPHome UART debugger
-std::string hex_repr(uint8_t *bytes, size_t len) {
-  std::string res;
-  char buf[5];
-  for (size_t i = 0; i < len; i++) {
-    if (i > 0)
-      res += ':';
-    sprintf(buf, "%02X", bytes[i]);
-    res += buf;
-  }
-  return res;
-}
-
-// Adapated from ESPHome UART debugger
-std::string str_repr(uint8_t *bytes, size_t len) {
-  std::string res;
-  char buf[5];
-  for (size_t i = 0; i < len; i++) {
-    if (bytes[i] == 7) {
-      res += "\\a";
-    } else if (bytes[i] == 8) {
-      res += "\\b";
-    } else if (bytes[i] == 9) {
-      res += "\\t";
-    } else if (bytes[i] == 10) {
-      res += "\\n";
-    } else if (bytes[i] == 11) {
-      res += "\\v";
-    } else if (bytes[i] == 12) {
-      res += "\\f";
-    } else if (bytes[i] == 13) {
-      res += "\\r";
-    } else if (bytes[i] == 27) {
-      res += "\\e";
-    } else if (bytes[i] == 34) {
-      res += "\\\"";
-    } else if (bytes[i] == 39) {
-      res += "\\'";
-    } else if (bytes[i] == 92) {
-      res += "\\\\";
-    } else if (bytes[i] < 32 || bytes[i] > 127) {
-      sprintf(buf, "\\x%02X", bytes[i]);
-      res += buf;
-    } else {
-      res += bytes[i];
-    }
-  }
-  return res;
-}
-
-std::string str_repr(std::vector<uint8_t> &bytes) {
-  return str_repr(&bytes[0], bytes.size());
 }
 
 bool DaikinS21::wait_byte_available(uint32_t  timeout)
@@ -288,7 +235,8 @@ bool DaikinS21::s21_query(std::vector<uint8_t> code) {
     return false;
   }
   if (byte != ACK) {
-    ESP_LOGW(TAG, "No ACK from S21 for %s query", c.c_str());
+    ESP_LOGW(TAG, "No ACK from S21 for %s query (was: %d (0x%02X) '%c'", c.c_str(), byte, byte, 
+        (byte >= 32 && byte <= 126) ? byte : '?');
     return false;
   }
 
@@ -320,87 +268,339 @@ bool DaikinS21::parse_response(std::vector<uint8_t> rcode,
              str_repr(payload).c_str(), payload.size());
   }
 
-  switch (rcode[0]) {
-    case 'G':      // F -> G
-      switch (rcode[1]) {
-        case '1':  // F1 -> Basic State
-          this->power_on = (payload[0] == '1');
-          this->mode = (DaikinClimateMode) payload[1];
-          this->setpoint = ((payload[2] - 28) * 5);  // Celsius * 10
-          this->fan = (DaikinFanMode) payload[3];
-          return true;
-        case '5':  // F5 -> G5 -- Swing state
-          this->swing_v = payload[0] & 1;
-          this->swing_h = payload[0] & 2;
-          return true;
-        case '6':                // F6 -> G6 - "powerful" mode
-          this->powerful = (payload[0] == '2') ? 1 : 0;
-          return true;
-        case '7':                // F7 - G7 - "eco" mode
-          this->econo = (payload[1] == '2') ? 1 : 0;
-          return true;
-        case '8':
-          if(
-                  (payload[0] == 0x30) && 
-                  (payload[1] == 0x00) && 
-                  (payload[2] == 0x00) && 
-                  (payload[3] == 0x00)
-                  ) {
-            this->f8_protocol = 0;
-          } else if(
-                  (payload[0] == 0x30) && 
-                  (payload[1] == 0x32) && 
-                  (payload[2] == 0x00) && 
-                  (payload[3] == 0x00)
-                  ) {
-                  this->f8_protocol = 2;
-          } else if(
-                  (payload[0] == 0x30) && 
-                  (payload[1] == 0x32) && 
-                  (payload[2] == 0x30) && 
-                  (payload[3] == 0x30) 
-                  ) {
-            this->f8_protocol = 2;
-          } else {
-            return false;
-          }
-          return true;
-        case '9':  // F9 -> G9 -- Inside temperature
-          this->temp_inside = temp_f9_byte_to_c10(&payload[0]);
-          this->temp_outside = temp_f9_byte_to_c10(&payload[1]);
-          return true;
+  if(uint8_starts_with_str(rcode, "G")) {
+    if(uint8_starts_with_str(rcode, StateResponse::Basic)) {
+      // F1 -> G1 Basic State
+      this->power_on = (payload[0] == '1');
+      this->mode = (DaikinClimateMode) payload[1];
+      this->setpoint = ((payload[2] - 28) * 5);  // Celsius * 10
+      this->fan = (DaikinFanMode) payload[3];
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::SwingOrHumidity)) {
+      // F5 -> G5 -- Swing state
+      this->swing_v = payload[0] & 1;
+      this->swing_h = payload[0] & 2;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::SpecialModes)) {
+      // F6 -> G6 - "powerful" mode
+      this->powerful = (payload[0] == '2') ? 1 : 0;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::DemandAndEcono)) {
+      // F7 -> G7 - "eco" mode
+      this->econo = (payload[1] == '2') ? 1 : 0;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::OldProtocol)) {
+      // F8 -> G8 - old protocol version
+      if(uint8_starts_with_str(payload, OldProtocol::Protocol0)) {
+        this->f8_protocol = 0;
+        this->protocol_checked = true;
+      } else if(uint8_starts_with_str(payload, OldProtocol::Protocol2_1)) {
+        this->f8_protocol = 2;
+        this->f8_protocol_variant = 1;
+        if (this->fy00_protocol_major == 3) {
+          this->fy00_protocol_minor = 0;
+          this->protocol_checked = true;
+        }
+      } else if(uint8_starts_with_str(payload, OldProtocol::Protocol2_2)) {
+        this->f8_protocol = 2;
+        this->f8_protocol_variant = 2;
+        if (this->fy00_protocol_major == 3) {
+          this->fy00_protocol_minor = 1;
+          this->protocol_checked = true;
+        }
+      } else {
+        return false;
       }
-      break;
-    case 'S':      // R -> S
-      switch (rcode[1]) {
-        case 'H':  // Inside temperature
-          this->temp_inside = temp_bytes_to_c10(payload);
-          return true;
-        case 'I':  // Coil temperature
-          this->temp_coil = temp_bytes_to_c10(payload);
-          return true;
-        case 'a':  // Outside temperature
-          this->temp_outside = temp_bytes_to_c10(payload);
-          return true;
-        case 'L':  // Fan speed
-          this->fan_rpm = bytes_to_num(payload) * 10;
-          return true;
-        case 'd':  // Compressor state / frequency? Idle if 0.
-          this->idle =
-              (payload[0] == '0' && payload[1] == '0' && payload[2] == '0');
-          return true;
-        default:
-          if (payload.size() > 3) {
-            int8_t temp = temp_bytes_to_c10(payload);
-            ESP_LOGD(TAG, "Unknown temp: %s -> %s -> %.1f C (%.1f F)",
-                     str_repr(rcode).c_str(), str_repr(payload).c_str(),
-                     c10_c(temp), c10_f(temp));
-          }
-          return false;
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::NewProtocol)) {
+      // FY00 -> GY00 - new protocol version
+      if(uint8_starts_with_str(payload, NewProtocol::Protocol3_00_or_3_10)) {
+        this->fy00_protocol_major = 3;
+        if (this->f8_protocol_variant == 1) {
+          this->fy00_protocol_minor = 0;
+          this->protocol_checked = true;
+        } else if (this->f8_protocol_variant == 2) {
+          this->fy00_protocol_minor = 1;
+          this->protocol_checked = true;
+        }
+      } else if(uint8_starts_with_str(payload, NewProtocol::Protocol3_20)) {
+        this->fy00_protocol_major = 3;
+        this->fy00_protocol_minor = 2;
+        this->protocol_checked = true;
+      } else if(uint8_starts_with_str(payload, NewProtocol::Protocol3_40)) {
+        this->fy00_protocol_major = 3;
+        this->fy00_protocol_minor = 4;
+        this->protocol_checked = true;
+      } else {
+        return false;
       }
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::InsideOutsideTemperatures)) {
+      // F9 -> G9 - inside and outside temperature
+      this->temp_inside = temp_f9_byte_to_c10(&payload[0]);
+      this->temp_outside = temp_f9_byte_to_c10(&payload[1]);
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::OptionalFeatures)) {
+      // F2 -> G2 - environment features
+      if (payload.size() == 4) {
+        ESP_LOGD(TAG, "Environment features: %s -> %s -> %s (%s (%s)) (%d)", str_repr(rcode).c_str(),
+        str_repr(payload).c_str(), this->little_endian ? "little" : "big", bin_repr(payload, this->little_endian).c_str(), this->little_endian ? "little" : "big", payload.size());
+
+        // https://github.com/revk/ESP32-Faikin/wiki/S21-Protocol#f2-command
+
+        // G2 -> 4:\x00\x00 -> little (00101100 01011100 00000000 00000000 (little)) (4)
+
+        // Response format: G2 [byte0] [byte1] [byte2] [byte3]
+        // Payload bytes are bit masks:
+
+        // byte0
+        // bit 0 - Unkown. set to 1 on CTXMxxRVMA, ignored by BRP069B41
+        // bit 1 - Zero
+        // bit 2 - Swing (any kind) is avaiiable
+        // bit 3 - Horizontal swing is available
+        // bit 4 - Shield bit (0x30)
+        // bit 5 - Shield bit (0x30)
+        // bit 6 - Zero
+        // bit 7 - Zero
+
+        // byte1
+        // bit 0 - Unkown. set to 1 on CTXMxxRVMA, ignored by BRP069B41
+        // bit 1 - Awlays 1, unknown
+        // bit 2 - Zero
+        // bit 3 - Unknown. Reflected by BRP069B41 in aircon/model_info. 0 => type=C, 1 => type=N
+        // bit 4 - Shield bit (0x30)
+        // bit 5 - Shield bit (0x30)
+        // bit 6 - Zero
+        // bit 7 - Zero
+
+        // byte2 - seen to be 0x00 on startup
+        // bit 7 - Set to 1 by DJ command. Purpose is unknown.
+
+        // byte3
+        // bit 0 - Zero
+        // bit 1 - "humidity" operation mode is available
+        // bit 2 - Zero
+        // bit 3 - Zero
+        // bit 4 - Humidity setting is available for additional operation modes (see matrix below)
+        // bit 5 - Zero
+        // bit 6 - Zero
+        // bit 7 - Always 1. Perhaps shield ?
+
+        return true;
+      } else {
+        ESP_LOGW(TAG, "S21 issue, payload should be 4: %s -> %s (%d)", str_repr(rcode).c_str(),
+        str_repr(payload).c_str(), payload.size());
+        return false;
+      }
+    } else if(uint8_starts_with_str(rcode, StateResponse::OnOffTimer)) {
+      // F3 -> G3 - on/off timer
+      if (payload.size() == 4) {
+        ESP_LOGD(TAG, "On/off timer: %s -> %s -> %s (%s) (%d)", str_repr(rcode).c_str(),
+        str_repr(payload).c_str(), bin_repr(payload, this->little_endian).c_str(), this->little_endian ? "little" : "big", payload.size());
+
+        // https://github.com/revk/ESP32-Faikin/wiki/S21-Protocol#f3-command
+
+        // On-off timer
+        // 0\x95\x80\x00
+
+        // byte 0:
+        // Bit 0 - On timer is set
+        // Bit 1 - Off timer is set
+        // Bits 4, 5 - shield bits, making up 0x30 (ASCII '0')
+
+        // byte 1 - On timer setting
+
+        // byte 2 - Off timer setting
+
+        // byte 3 - Reports 0x00 after bootup, changed to 0x30 by DJ. Meaning unknown.
+
+        // Timer settings range from 1 to 12 hours, 
+        // and corresponding values are: 
+        // 0x36, 0x3C, 0x42, 0x48, 0x4E, 0x54, 
+        // 0x5A, 0x60, 0x66, 0x6C, 0x72, 0x78. 
+        // In other words, time value starts from 0x30 (which would be 0), 
+        // then one hour equals to an increment of 6. 
+        // This gives an idea that perhaps timer granularity 
+        // is 10 minutes (1/6 of hour), but it's unclear if the 
+        // unit would accept them properly.
+
+        // On majority of units if the timer is disabled, 
+        // the respective setting bytes are set to 0xFE. 
+        // However, on ATX20K2V1B and S22ZTES-W they read as 0x30 in this case.
+        return true;
+      } else {
+        ESP_LOGW(TAG, "S21 issue, payload should be 4: %s -> %s (%d)", str_repr(rcode).c_str(),
+        str_repr(payload).c_str(), payload.size());
+        return false;
+      }
+    } else if(uint8_starts_with_str(rcode, StateResponse::ErrorStatus)) {
+      // F4 -> G4 - error status
+      if (payload.size() == 4) {
+        ESP_LOGD(TAG, "Error status: %s -> %s -> %s (%s) (%d)", str_repr(rcode).c_str(),
+        str_repr(payload).c_str(), bin_repr(payload, this->little_endian).c_str(), this->little_endian ? "little" : "big", payload.size());
+
+        // https://github.com/revk/ESP32-Faikin/wiki/S21-Protocol#f4-command
+
+        // 0\xB2\x80\x00 Error status: G4 -> 0\x00\x80\x00 -> 00110000 00000000 10000000 00000000 (4)
+
+        // byte0: 0x30 ('0')
+        // byte1: 0x00
+        // byte2
+        // Bit 5: Conditioner internal error flag. If reported as 1, BRP069B41 only polls 4 commands F1-F3-F4-F2 and reports in /aircon/model_info:
+        // ret=SERIAL IF FAILURE,err=252
+        // Experiments show, that once read, the bit resets to 0. It's not known which actions cause it to raise.
+        // byte3: 0x30 ('0')
+
+        return true;
+      } else {
+        ESP_LOGW(TAG, "S21 issue, payload should be 4: %s -> %s (%d)", str_repr(rcode).c_str(),
+        str_repr(payload).c_str(), payload.size());
+        return false;
+      }
+    } else if(uint8_starts_with_str(rcode, StateResponse::ModelCode)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::IRCounter)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::V2OptionalFeatures)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::PowerConsumption)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::LouvreAngle)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::V3OptionalFeatures)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::AllowedTemperatureRange)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::ModelName)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::ProductionInformation)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::ProductionOrder)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::IndoorProductionInformation)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, StateResponse::OutdoorProductionInformation)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    }
+  } else if(uint8_starts_with_str(rcode, "S")) {
+    if(uint8_starts_with_str(rcode, EnvironmentResponse::InsideTemperature)) {
+      // RH -> SH - inside temperature
+      this->temp_inside = temp_bytes_to_c10(payload);
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::LiquidTemperature)) {
+      // RI -> SI - coil temperature
+      this->temp_coil = temp_bytes_to_c10(payload);
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::OutsideTemperature)) {
+      // Ra -> Sa - outside temperature
+      this->temp_outside = temp_bytes_to_c10(payload);
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::FanSpeed)) {
+      // RL -> SL - fan speed
+      this->fan_rpm = bytes_to_num(payload) * 10;
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::CompressorFrequency)) {
+      // Rd -> Sd - compressor state / frequency? Idle if 0.
+      this->idle =
+      (payload[0] == '0' && payload[1] == '0' && payload[2] == '0');
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::PowerOnOff)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::IndoorUnitMode)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::TemperatureSetPoint)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::OnTimerSetting)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::OffTimerSetting)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::FanMode)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::FanSetPoint)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::LouvreAngleSetPoint)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::VerticalSwingAngle)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::TargetTemperature)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::IndoorFrequencyCommandSignal)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::IndoorHumidity)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::CompressorOnOff)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::UnitState)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else if(uint8_starts_with_str(rcode, EnvironmentResponse::SystemState)) {
+      ESP_LOGW(TAG, "S21 unhandled: %s -> %s (%d)", str_repr(rcode).c_str(),
+             str_repr(payload).c_str(), payload.size());
+      return true;
+    } else {
+      // default
+      if (payload.size() > 3) {
+        int8_t temp = temp_bytes_to_c10(payload);
+        ESP_LOGD(TAG, "Unknown temp: %s -> %s -> %s -> %s (%s) -> %.1f C (%.1f F)",
+                 str_repr(rcode).c_str(), str_repr(payload).c_str(), hex_repr(payload).c_str(), bin_repr(payload, this->little_endian).c_str(), this->little_endian ? "little" : "big",
+                 c10_c(temp), c10_f(temp));
+        return false;
+      }
+    }
   }
-  ESP_LOGD(TAG, "Unknown response %s -> \"%s\"", str_repr(rcode).c_str(),
-           str_repr(payload).c_str());
+  ESP_LOGD(TAG, "Unknown response %s -> %s -> %s -> %s (%s)", str_repr(rcode).c_str(), 
+           str_repr(payload).c_str(), hex_repr(payload).c_str(), bin_repr(payload, this->little_endian).c_str(), this->little_endian ? "little" : "big");
   return false;
 }
 
@@ -408,26 +608,624 @@ bool DaikinS21::run_queries(std::vector<std::string> queries) {
   bool success = true;
 
   for (auto q : queries) {
-    std::vector<uint8_t> code(q.begin(), q.end());
-    success = this->s21_query(code) && success;
+    success = this->run_query(q) && success;
   }
 
   return success;  // True if all queries successful
 }
 
-void DaikinS21::update() {
-  std::vector<std::string> queries = {"F1", "F5", "Rd"};
-  // These queries might fail but they won't affect the basic functionality
-  std::vector<std::string> failable_queries = {"F6", "F7", "F9", "RH", "RI", "Ra", "RL", "F8"};
-  if (this->run_queries(queries)) {
-    this->run_queries(failable_queries);
-    if(!this->ready) {
-      ESP_LOGI(TAG, "Daikin S21 Ready");
-      this->ready = true;
+bool DaikinS21::run_query(std::string query) {
+  std::vector<uint8_t> code(query.begin(), query.end());
+  if(query == "FY00" && this->f8_protocol != -1){
+    this->s21_query(code);
+    return true; // special case where FY00 can return NAK
+  }
+  return this->s21_query(code);
+}
+
+/**
+ * Runs the next startup query command
+ * @return true if all the startup queries have been run successfully
+ */
+bool DaikinS21::run_next_startup_query() {
+  if (startup_queries.size() == 0) {
+    ESP_LOGW(TAG, "Startup query size is 0");
+    return false; // special case if queries are empty
+  }
+  if (startup_query_index < startup_queries.size()) {
+    if (this->debug_protocol) {
+      ESP_LOGD(TAG, "Running startup query: %s", startup_queries[this->startup_query_index].c_str());
     }
+    if(this->run_query(startup_queries[this->startup_query_index])) {
+      startup_query_index++; // increment once this query is successful
+    }
+  } else {
+    startup_complete = true; // if all queries are done, set startup_complete to true
+  }
+
+  return startup_complete;  // true if all queries successful else false
+}
+
+/**
+ * Runs the next state query command
+ * @return true if query was run successfully
+ */
+bool DaikinS21::run_next_state_query() {
+  if (state_queries.size() == 0) {
+    ESP_LOGW(TAG, "State query size is 0");
+    return false; // special case if queries are empty
+  }
+  if (state_query_index >= state_queries.size()){
+    state_query_index = 0; // reset the index to 0
   }
   if (this->debug_protocol) {
-    this->dump_state();
+    ESP_LOGD(TAG, "Running state query: %s", state_queries[this->state_query_index].c_str());
+  }
+  bool success = this->run_query(state_queries[this->state_query_index]);
+  if (success) {
+    state_query_index++; // increment once this query is successful
+  }
+  return success;
+}
+
+/**
+ * Runs the next environment query command and always increments the index
+ * @return true if query was run successfully
+ */
+bool DaikinS21::run_next_environment_query() {
+  if (environment_queries.size() == 0) {
+    ESP_LOGW(TAG, "Environment query size is 0");
+    return false; // special case if queries are empty
+  }
+  if (environment_query_index >= environment_queries.size()){
+    environment_query_index = 0; // reset the index to 0
+  }
+  if (this->debug_protocol) {
+    ESP_LOGD(TAG, "Running environment query: %s", environment_queries[this->environment_query_index].c_str());
+  }
+  bool success = this->run_query(environment_queries[this->environment_query_index++]);
+  return success;
+}
+
+bool DaikinS21::run_next_basic_query() {
+if (basic_queries.size() == 0) {
+    ESP_LOGW(TAG, "Basic query size is 0");
+    return false; // special case if queries are empty
+  }
+  if (basic_query_index >= basic_queries.size()){
+    basic_query_index = 0; // reset the index to 0
+  }
+  if (this->debug_protocol) {
+    ESP_LOGD(TAG, "Running basic query: %s", basic_queries[this->basic_query_index].c_str());
+  }
+  bool success = this->run_query(basic_queries[this->basic_query_index]);
+  if (success) {
+    basic_query_index++; // increment once this query is successful
+  }
+  return success;
+}
+
+
+void DaikinS21::set_queries() {
+  ESP_LOGD(TAG, "Setting queries with protocol %s", this->get_protocol_version());
+  this->startup_queries = this->get_startup_queries();
+  this->state_queries = this->get_state_queries();
+  this->environment_queries = this->get_environment_queries();
+  this->basic_queries = this->get_basic_queries();
+}
+
+// Protocol 0
+//  Supported R commands: RA, RB, RC, RD, RE, RF, RG, RH, RI, RK, RL, RM, RN, RW, RX, Ra, Rb, Rd, Re, Rg, Rz
+//  Supported F commands: F1, F2, F3, F4, F5, F8
+//  Supported miscellaneous commands: A, M, V
+//  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 RH Ra M
+//  BRP069B41 polling loop: F2 F1 F3 F4 F5 F8 [sensor]
+// Protocol 2
+//  Supported R commands: RA, RB, RC, RD, RE, RF, RG, RH, RI, RK, RL, RM, RN, RW, RX, Ra, Rb, Rd, Re, Rg, Rz
+//  Supported miscellaneous commands: A, M, V, VS000M
+//  BRP068B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 M DJ2010
+//  BRP068B41 polling loop: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT [sensor]
+// Protocol 3.0
+//  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 M DJ2030 DJ2010
+//  BRP069B41 polling loop: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT [sensor]
+// Protocol 3.1
+//  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 M VS000M DJ4030
+//  BRP069B41 polling loop: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT [sensor]
+// Protocol 3.2
+//  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 FU00 FU02 VS000M DJ5010 D70000
+//  BRP069B41 polling loop: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FU02 FU04 [sensor]
+//  BRP069C41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 FU00 FU02 VS000M Rd RL RH RN RI Ra RX FX00 FX10 FX20 FX30 FX40 FX50 FX60 FX70 FX80 Rz52 Rz72 FX90 FXA0 FXB0 FXC0 DY10 DY20
+
+// Below commands, queried by BRP069B41 controller are listed in their order. 
+// This gives a good overview of which commands are actually known by the controller and officially used by Daikin. 
+// [sensor] denotes one R family command out of sensor query sequence (TBD). 
+// I. e. the controller asks one particular each poll iteration. 
+// On next iteration next sensor will be queried.
+
+const char* DaikinS21::get_protocol_version() {
+  if (!this->protocol_checked)
+  {
+    return HumanReadableProtocol::ProtocolUnknown;
+  }
+  switch (f8_protocol)
+  {
+    case 0:
+      return HumanReadableProtocol::Protocol0;
+    case 2: 
+      switch (fy00_protocol_minor)
+      {
+      case 0:
+        return HumanReadableProtocol::Protocol3_0;
+      case 1:
+        return HumanReadableProtocol::Protocol3_1;
+      case 2:
+        return HumanReadableProtocol::Protocol3_2;
+      case 4:
+        return HumanReadableProtocol::Protocol3_4;
+      default:
+        return HumanReadableProtocol::Protocol2;
+      }
+    default:
+      return HumanReadableProtocol::ProtocolUnknown;
+  }
+}
+
+std::vector<std::string> DaikinS21::get_startup_queries(){
+  const char* protocol = this->get_protocol_version();
+  if (protocol == HumanReadableProtocol::ProtocolUnknown) {
+    return {StateQuery::OldProtocol, StateQuery::NewProtocol};
+  } else if (protocol == HumanReadableProtocol::Protocol0) 
+  {
+    //  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 RH Ra M
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, //F5
+      EnvironmentQuery::InsideTemperature, // RH
+      EnvironmentQuery::OutsideTemperature // Ra
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol2) {
+    //  BRP068B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 M DJ2010
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::ModelCode, //FC
+      //DJ2010
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_0) {
+    //  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 M DJ2030 DJ2010
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::ModelCode, //FC
+      // FY10 
+      // FY20
+      // DJ2030 
+      // DJ2010
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_1) {
+    //  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 M VS000M DJ4030
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::ModelCode, //FC
+      // FY10 
+      // FY20
+      // VS000M
+      // DJ4030
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_2) {
+    //  BRP069B41 startup sequence: F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FC FY00 FY10 FY20 FU00 FU02 VS000M DJ5010 D70000
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::ModelCode, //FC
+      // FY10 
+      // FY20
+      StateQuery::V3OptionalFeatures, // FU00
+      StateQuery::AllowedTemperatureRange, // FU02
+      // DJ5010 
+      // D70000
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_4) {
+    ESP_LOGW(TAG, "Protocol %s doesn't have full support yet so falling back to %s", protocol, HumanReadableProtocol::Protocol3_2);
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::ModelCode, //FC
+      // FY10 
+      // FY20
+      StateQuery::V3OptionalFeatures, // FU00
+      StateQuery::AllowedTemperatureRange, // FU02
+      // DJ5010 
+      // D70000
+    };
+  } else {
+    ESP_LOGW(TAG, "Protocol %s is not supported yet, defaulting to %s", protocol, HumanReadableProtocol::Protocol0);
+    return {
+      StateQuery::OldProtocol, 
+      StateQuery::NewProtocol,
+      StateQuery::OptionalFeatures, // F2
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, //F5
+      EnvironmentQuery::InsideTemperature, // RH
+      EnvironmentQuery::OutsideTemperature // Ra
+    };
+  }
+}
+
+std::vector<std::string> DaikinS21::get_state_queries(){
+  const char* protocol = this->get_protocol_version();
+  if (protocol == HumanReadableProtocol::ProtocolUnknown) {
+    return {};
+  } else if (protocol == HumanReadableProtocol::Protocol0) {
+    //  BRP069B41 polling loop: F2 F1 F3 F4 F5 F8 [sensor]
+    // F8 and F2 are moved to startup only
+    // RA, RB, RC, RD, RE, RF, RG, RH, RI, RK, RL, RM, RN, RW, RX, Ra, Rb, Rd, Re, Rg, Rz
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      // StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity //F5
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol2) {
+    // F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_0) {
+    // F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_1) {
+    // F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_2) {
+    // F2 F1 F3 F4 F5 F8 F9 F6 F7 FB FG FK FM FN FP FQ FS FT FU02 FU04
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::AllowedTemperatureRange, // FU02
+      // FU04
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_4) {
+    ESP_LOGW(TAG, "Protocol %s doesn't have full support yet so falling back to %s", protocol, HumanReadableProtocol::Protocol3_2);
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, // F5
+      StateQuery::InsideOutsideTemperatures, // F9
+      StateQuery::SpecialModes, // F6
+      StateQuery::DemandAndEcono, // F7
+      // FB
+      StateQuery::IRCounter, // FG
+      StateQuery::V2OptionalFeatures, // FK
+      StateQuery::PowerConsumption, // FM 
+      //FN 
+      //FP 
+      //FQ 
+      //FS 
+      //FT 
+      StateQuery::AllowedTemperatureRange, // FU02
+      // FU04
+    };
+  } else {
+    ESP_LOGW(TAG, "Protocol %s is not supported yet, defaulting to %s", protocol, HumanReadableProtocol::Protocol0);
+    return {
+      StateQuery::Basic, // F1
+      StateQuery::OnOffTimer, // F3
+      // StateQuery::ErrorStatus, // F4
+      StateQuery::SwingOrHumidity, //F5
+      EnvironmentQuery::CompressorFrequency // Rd
+    };
+  }
+}
+
+// These queries might fail but they won't affect the basic functionality
+// F6, F7 and F9 should only be run for protocols that support it (after F8 and FY00)
+// std::vector<std::string> failable_queries = {EnvironmentQuery::InsideTemperature, EnvironmentQuery::LiquidTemperature, EnvironmentQuery::OutsideTemperature, EnvironmentQuery::FanSpeed};
+std::vector<std::string> DaikinS21::get_environment_queries(){
+  const char* protocol = this->get_protocol_version();
+  // RA, RB, RC, RD, RE, RF, RG, RH, RI, RK, RL, RM, RN, RW, RX, Ra, Rb, Rd, Re, Rg, Rz
+  if (protocol == HumanReadableProtocol::ProtocolUnknown) {
+    return {};
+  } else if (
+    protocol == HumanReadableProtocol::Protocol0 || 
+    protocol == HumanReadableProtocol::Protocol2 || 
+    protocol == HumanReadableProtocol::Protocol3_0 ||
+    protocol == HumanReadableProtocol::Protocol3_1 ||
+    protocol == HumanReadableProtocol::Protocol3_2
+  ) {
+    return {
+      EnvironmentQuery::PowerOnOff, // RA
+      EnvironmentQuery::IndoorUnitMode, // RB
+      EnvironmentQuery::TemperatureSetPoint, // RC
+      EnvironmentQuery::OnTimerSetting, // RD
+      EnvironmentQuery::OffTimerSetting, // RE
+      // RF
+      EnvironmentQuery::FanMode, // RG
+      EnvironmentQuery::FanSetPoint, // RK
+      EnvironmentQuery::FanSpeed, // RL
+      EnvironmentQuery::LouvreAngleSetPoint, // RM
+      EnvironmentQuery::VerticalSwingAngle, // RN
+      // RW
+      EnvironmentQuery::TargetTemperature, // RX
+      EnvironmentQuery::IndoorFrequencyCommandSignal, // Rb
+      EnvironmentQuery::IndoorHumidity, // Re
+      EnvironmentQuery::CompressorOnOff, // Rg
+      EnvironmentQuery::UnitState, // RzB2
+      EnvironmentQuery::SystemState // RzC3
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_4) {
+    ESP_LOGW(TAG, "Protocol %s doesn't have full support yet so falling back to %s", protocol, HumanReadableProtocol::Protocol3_2);
+    return {
+      EnvironmentQuery::PowerOnOff, // RA
+      EnvironmentQuery::IndoorUnitMode, // RB
+      EnvironmentQuery::TemperatureSetPoint, // RC
+      EnvironmentQuery::OnTimerSetting, // RD
+      EnvironmentQuery::OffTimerSetting, // RE
+      // RF
+      EnvironmentQuery::FanMode, // RG
+      EnvironmentQuery::FanSetPoint, // RK
+      EnvironmentQuery::FanSpeed, // RL
+      EnvironmentQuery::LouvreAngleSetPoint, // RM
+      EnvironmentQuery::VerticalSwingAngle, // RN
+      // RW
+      EnvironmentQuery::TargetTemperature, // RX
+      EnvironmentQuery::IndoorFrequencyCommandSignal, // Rb
+      EnvironmentQuery::IndoorHumidity, // Re
+      EnvironmentQuery::CompressorOnOff, // Rg
+      EnvironmentQuery::UnitState, // RzB2
+      EnvironmentQuery::SystemState // RzC3
+    };
+  } else {
+    ESP_LOGW(TAG, "Protocol %s is not supported yet, defaulting to %s", protocol, HumanReadableProtocol::Protocol0);
+    return {
+      EnvironmentQuery::PowerOnOff, // RA
+      EnvironmentQuery::IndoorUnitMode, // RB
+      EnvironmentQuery::TemperatureSetPoint, // RC
+      EnvironmentQuery::OnTimerSetting, // RD
+      EnvironmentQuery::OffTimerSetting, // RE
+      // RF
+      EnvironmentQuery::FanMode, // RG
+      EnvironmentQuery::FanSetPoint, // RK
+      EnvironmentQuery::FanSpeed, // RL
+      EnvironmentQuery::LouvreAngleSetPoint, // RM
+      EnvironmentQuery::VerticalSwingAngle, // RN
+      // RW
+      EnvironmentQuery::TargetTemperature, // RX
+      EnvironmentQuery::IndoorFrequencyCommandSignal, // Rb
+      EnvironmentQuery::IndoorHumidity, // Re
+      EnvironmentQuery::CompressorOnOff, // Rg
+      EnvironmentQuery::UnitState, // RzB2
+      EnvironmentQuery::SystemState // RzC3
+    };
+  }
+}
+
+std::vector<std::string> DaikinS21::get_basic_queries(){
+  const char* protocol = this->get_protocol_version();
+  if (protocol == HumanReadableProtocol::ProtocolUnknown) {
+    return {};
+  } else if (
+    protocol == HumanReadableProtocol::Protocol0 || 
+    protocol == HumanReadableProtocol::Protocol2 || 
+    protocol == HumanReadableProtocol::Protocol3_0 ||
+    protocol == HumanReadableProtocol::Protocol3_1 ||
+    protocol == HumanReadableProtocol::Protocol3_2
+  ) {
+    return {
+      EnvironmentQuery::InsideTemperature, // RH
+      EnvironmentQuery::LiquidTemperature, // RI
+      EnvironmentQuery::OutsideTemperature, // Ra
+      EnvironmentQuery::CompressorFrequency, // Rd
+    };
+  } else if (protocol == HumanReadableProtocol::Protocol3_4) {
+    ESP_LOGW(TAG, "Protocol %s doesn't have full support yet so falling back to %s", protocol, HumanReadableProtocol::Protocol3_2);
+    return {
+      EnvironmentQuery::InsideTemperature, // RH
+      EnvironmentQuery::LiquidTemperature, // RI
+      EnvironmentQuery::OutsideTemperature, // Ra
+      EnvironmentQuery::CompressorFrequency, // Rd
+    };
+  } else {
+    ESP_LOGW(TAG, "Protocol %s is not supported yet, defaulting to %s", protocol, HumanReadableProtocol::Protocol0);
+    return {
+      EnvironmentQuery::InsideTemperature, // RH
+      EnvironmentQuery::LiquidTemperature, // RI
+      EnvironmentQuery::OutsideTemperature, // Ra
+      EnvironmentQuery::CompressorFrequency, // Rd
+    };
+  }
+}
+
+void DaikinS21::update() {
+  // if protocol has not been set then we run the protocol queries
+  if(!this->protocol_checked || this->f8_protocol == 2 && this->fy00_protocol_major == -1) {
+    // protocol_checked is set true when:
+    // - F8 returns 0
+    // - F8 returns one of the 2 version 2 variants and FY00 returns 3
+    // - FY00 returns protocol 3.2
+    // - FY00 returns protocol 3.0/3.1 and F8 is already one of the version 2 variants
+    // special case is when f8 version is 2 and fy00 is NAK, then we need to just assume protocol version 2
+    this->run_next_startup_query();
+    if (this->protocol_checked){ // when it first gets set to true
+      this->set_queries(); // set the three sets of queries
+      this->little_endian=is_little_endian(); // sets endian-ness
+    }
+  } else {
+    if(!this->startup_complete) {
+      // startup queries can run at once and block
+      this->startup_complete = this->run_next_startup_query();
+      ESP_LOGI(TAG, "Daikin S21 startup complete: %s", YESNO(this->startup_complete));
+    } else {
+      // required updates should run one per loop
+      if (this->run_next_state_query() && this->run_next_basic_query()) {
+        // environment updates should run one per loop and only if the required update succeeded
+        this->run_next_environment_query();
+        if(!this->ready) {
+          ESP_LOGI(TAG, "Daikin S21 Ready");
+          this->ready = true;
+        }
+      }
+      if (this->debug_protocol) {
+        this->dump_state();
+      }
+    }
   }
 
 #ifdef S21_EXPERIMENTS
@@ -441,6 +1239,18 @@ void DaikinS21::update() {
                                           "RX", "RD", "M",  "FU0F"};
   this->run_queries(experiments);
 #endif
+}
+
+void DaikinS21::full_update() {
+  ESP_LOGI(TAG, "Performing full required update");
+  delay(500); // delay to allow the device to process the previous command
+  if(!this->run_queries(this->basic_queries) || !this->run_queries(this->state_queries)) { 
+    // run all required queries
+    ESP_LOGW(TAG, "Full update failed");
+  }
+  if (this->debug_protocol) {
+    this->dump_state();
+  }
 }
 
 void DaikinS21::dump_state() {
@@ -463,9 +1273,9 @@ void DaikinS21::dump_state() {
            c10_f(this->temp_outside));
   ESP_LOGD(TAG, "   Coil: %.1f C (%.1f F)", c10_c(this->temp_coil),
            c10_f(this->temp_coil));
-  ESP_LOGD(TAG, "    Protocol: x (F8: %d, FY00: %.1f)",
-           this->f8_protocol, this->fy00_protocol);
-
+  ESP_LOGD(TAG, "    Protocol: %s (F8: %d [variant: %d], FY00: [major: %d, minor: %d])",
+           this->get_protocol_version(), this->f8_protocol, this->f8_protocol_variant, this->fy00_protocol_major, this->fy00_protocol_minor);
+  ESP_LOGD(TAG, "System is %s-endian", this->little_endian ? "little" : "big");
   ESP_LOGD(TAG, "** END STATE *****************************");
 }
 
@@ -485,7 +1295,7 @@ void DaikinS21::set_daikin_climate_settings(bool power_on,
   if (!this->send_cmd({'D', '1'}, cmd)) {
     ESP_LOGW(TAG, "Failed basic climate CMD");
   } else {
-    this->update();
+    this->full_update();
   }
 }
 
@@ -498,7 +1308,7 @@ void DaikinS21::set_swing_settings(bool swing_v, bool swing_h) {
   if (!this->send_cmd({'D', '5'}, cmd)) {
     ESP_LOGW(TAG, "Failed swing CMD");
   } else {
-    this->update();
+    this->full_update();
   }
 }
 
@@ -510,7 +1320,7 @@ void DaikinS21::set_powerful_settings(bool value)
   if (!this->send_cmd({'D', '6'}, cmd)) {
     ESP_LOGW(TAG, "Failed powerful CMD");
   } else {
-    this->update();
+    this->full_update();
   }
 }
 
@@ -522,7 +1332,7 @@ void DaikinS21::set_econo_settings(bool value)
   if (!this->send_cmd({'D', '7'}, cmd)) {
     ESP_LOGW(TAG, "Failed econo CMD");
   } else {
-    this->update();
+    this->full_update();
   }
 }
 
